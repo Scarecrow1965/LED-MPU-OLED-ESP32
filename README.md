@@ -1,1 +1,1 @@
-This program is using some icons to be seen on the SSD1306. while ensuring that my MPU-5060 is attached to my DOIT V1 Devkit ESP32. I have also my LEDs running some funky trickes as well. Of course, I am using PlatformIO in VSCode.
+This program is using some icons to be seen on the SSD1306, while ensuring that my MPU-5060 is attached to my DOIT V1 Devkit ESP32. I have also my LEDs running some funky tricks as well. Of course, I am using PlatformIO in VSCode.
