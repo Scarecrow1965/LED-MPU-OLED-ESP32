@@ -1,0 +1,820 @@
+#include <Arduino.h>
+#include <I2Cdev.h>
+#include <MPU6050.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_GFX.h>
+#include <U8g2lib.h>
+
+#ifdef U8X8_HAVE_HW_SPI
+#include <SPI.h>
+#endif
+#ifdef U8X8_HAVE_HW_I2C
+#include <Wire.h>
+#endif
+
+#define FASTLED_INTERNAL // Suppress build banner
+#include <FastLED.h>
+
+#define LED_PIN0 10 // Test Bench
+#define LED_PIN1 8 // Standup Desk
+#define LED_PIN2 7 // Storage Bench
+#define NUM_LED_PIN0 278 // Test Bench
+#define NUM_LED_PIN1 222 // Standup Desk
+#define NUM_LED_PIN2 242 // Storage Bench
+#define BRIGHTNESS 32    // 0 to 255 of the LEDs brightness
+#define LED_TYPE WS2812B // type works for the WS2815 which I am using
+#define COLOR_ORDER RGB
+CRGB led_Strip0[NUM_LED_PIN0]; // Test Bench
+CRGB led_Strip1[NUM_LED_PIN1]; // Standup Desk
+CRGB led_Strip2[NUM_LED_PIN2]; // Storage Bench
+CRGBPalette16 currentPalette;
+TBlendType currentBlending;
+
+void ledStripTest(CRGB *leds, int numLEDs) {
+    FastLED.clear();
+
+    FastLED.show();
+    for (int i = 0; i < numLEDs; i++) {
+        leds[i] = CRGB::White; // set our current dot to red
+        FastLED.show();
+        leds[i] = CRGB::Black; // set our current dot to black before we continue
+    }
+} // end led strip test function
+
+static uint8_t startIndex = 0; // setting things up for the various Palette functions
+int effectIndices[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19};
+typedef void (*EffectFunction)(void);
+typedef void (*EffectFunctionWithArgs)(uint8_t, uint8_t, uint8_t);
+bool ledEffectActive = false;
+bool gyroOrAccelChanged = false;
+
+#define OLED_CLOCK 21 // SCA pin on Display = SCL on Mega
+#define OLED_DATA 20  // SDL pin on display = SDA on Mega
+#define LED_BUILTIN 13  // pin for onboard LED or use LED_BUILTIN as the default location
+#define INTERRUPT_PIN 2 // interrupt connected to MPU-6050
+#define SCREEN_I2C_ADDR 0x3C // or 0x3C
+#define SCREEN_WIDTH 128     // OLED display width, in pixels
+#define SCREEN_HEIGHT 64     // OLED display height, in pixels
+#define OLED_RST_PIN -1      // Reset pin (-1 if not available)
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, OLED_CLOCK, OLED_DATA, U8X8_PIN_NONE); // This works but according to the function, it shouldn't
+int oled_LineH = 0;
+Adafruit_SSD1306 display(128, 64, &Wire, OLED_RST_PIN);
+
+MPU6050 mpu1;
+int16_t AccX, AccY, AccZ, Temp, GyroX, GyroY, GyroZ;
+Adafruit_MPU6050 mpu2;
+const int MPU6050_addr = 0x68; // to initialize the address of the MPU-6050
+
+void imuOffset() {
+    mpu2.setAccelerometerRange(MPU6050_RANGE_16_G);
+    mpu2.setGyroRange(MPU6050_RANGE_500_DEG);
+    mpu2.setFilterBandwidth(MPU6050_BAND_44_HZ);
+    int16_t ax_offset = -406;
+    int16_t ay_offset = -4151;
+    int16_t az_offset = 3645; // adjusted manually to reflect closer to zero reading
+    int16_t gx_offset = -143; // adjusted manually to reflect closer to zero reading
+    int16_t gy_offset = -14;
+    int16_t gz_offset = 73;
+    mpu1.setXAccelOffset(ax_offset);
+    mpu1.setYAccelOffset(ay_offset);
+    mpu1.setZAccelOffset(az_offset);
+    mpu1.setXGyroOffset(gx_offset);
+    mpu1.setYGyroOffset(gy_offset);
+    mpu1.setZGyroOffset(gz_offset);
+} // end IMU setup up to new default values
+
+static bool bLED = LOW;
+unsigned long oledPreviousMillis = 0;
+unsigned long oledanimPreviousMillis = 0;
+unsigned long ledPreviousMillis = 0;
+unsigned long lastGyroCheckTime = 0;
+unsigned long currentMillis = 0;
+const long timePeriod010 = 10;   // Delay equal to 10 ms
+const long timePeriod005 = 5;    // delay equal to 5 ms
+const long TimePeriod05 = 500;   // Delay equal to 1/2 second
+const long timePeriod1 = 1000;   // Delay equal to 1 sec pause
+const long timePeriod2 = 2000;   // Delay equal to 2 second pause
+const long timePeriod15 = 15000; // Delay equal to 15 seconds duration
+const long timePeriod30 = 30000; // Delay equal to 30 second duration
+
+void setup() {
+    delay(1000); // power-up safety delay
+
+    pinMode(LED_BUILTIN, OUTPUT);  // this is the LED on the Arduino Mega board as output
+    pinMode(LED_PIN0, OUTPUT);     // This is the Test Bench LEDs as output
+    pinMode(LED_PIN1, OUTPUT);     // This is the Stand Up Desk LEDs as output
+    pinMode(LED_PIN2, OUTPUT);     // This is the Storage bench LEDS as output
+    pinMode(INTERRUPT_PIN, INPUT); // This is for the MPU interrupt pin
+
+    Serial.begin(115200);
+    Serial.println("Resetting. \n");
+
+    FastLED.addLeds<LED_TYPE, LED_PIN0, COLOR_ORDER>(led_Strip0, NUM_LED_PIN0).setCorrection(TypicalLEDStrip);
+    FastLED.addLeds<LED_TYPE, LED_PIN1, COLOR_ORDER>(led_Strip1, NUM_LED_PIN1).setCorrection(TypicalLEDStrip);
+    FastLED.addLeds<LED_TYPE, LED_PIN2, COLOR_ORDER>(led_Strip2, NUM_LED_PIN2).setCorrection(TypicalLEDStrip);
+    FastLED.setBrightness(BRIGHTNESS);
+    FastLED.clear();
+
+    Serial.println("Starting LED Strip test");
+    ledStripTest(led_Strip0, NUM_LED_PIN0);
+    ledStripTest(led_Strip1, NUM_LED_PIN1);
+    ledStripTest(led_Strip2, NUM_LED_PIN2);
+
+    u8g2.begin();
+    u8g2.clear();
+    u8g2.setFont(u8g2_font_profont10_tf);
+    oled_LineH = u8g2.getFontAscent() - u8g2.getFontDescent(); // Descent is a negative number so we add it to the total
+    if (!u8g2.begin()) {
+        Serial.println(F("SSD1306 allocation failed!"));
+        for (;;) { } // don't proceed, loop forever
+    }
+
+    display.begin(SSD1306_SWITCHCAPVCC, SCREEN_I2C_ADDR); // NEED: this is for the Adafruit SSD1306 drivers to work
+
+    Serial.println(F("Testing device connections..."));
+    Serial.println(mpu2.begin() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
+
+    imuOffset(); // calibrating MPU6050 with proper values for this setup
+
+    Wire.begin();
+    Wire.beginTransmission(MPU6050_addr);
+    Wire.write(0x6B);
+    Wire.write(0);
+    Wire.endTransmission(true);
+
+    randomSeed(analogRead(A0)); // Seed the random number generator with analog input
+
+    Serial.println("Setup done.\n\n");
+} // end set up function
+
+void readMPUdata() {
+    Wire.beginTransmission(MPU6050_addr);
+    Wire.write(0x3B);
+    Wire.endTransmission(false);
+    Wire.requestFrom(MPU6050_addr, 14, true);
+    AccX = Wire.read() << 8 | Wire.read();
+    AccY = Wire.read() << 8 | Wire.read();
+    AccZ = Wire.read() << 8 | Wire.read();
+    Temp = Wire.read() << 8 | Wire.read();
+    GyroX = Wire.read() << 8 | Wire.read();
+    GyroY = Wire.read() << 8 | Wire.read();
+    GyroZ = Wire.read() << 8 | Wire.read();
+} // end reading MPU data
+
+double framesPerSecond(double seconds) {
+    static double framesPerSeconds;
+    framesPerSeconds = (framesPerSeconds * .9) + (1.0 / seconds * .1);
+    return framesPerSeconds;
+} // end Frames per second function
+
+void displayAllGyro(double framespersecond) {
+    bLED = !bLED; // toggle LED State
+    digitalWrite(LED_BUILTIN, bLED);
+
+    u8g2.clearBuffer();
+    u8g2.home();
+    u8g2.drawFrame(0, 0, u8g2.getWidth(), u8g2.getHeight()); // Draw a border around the display
+
+    readMPUdata(); // reads the MPU-6050
+
+    u8g2.setFont(u8g2_font_profont10_tf);
+    u8g2.setCursor(3, oled_LineH * 1 + 2);
+    u8g2.print("FPS: ");
+    u8g2.print(framespersecond); // Placeholder for framerate
+    u8g2.setCursor(3, oled_LineH * 3 + 2);
+    u8g2.println("Accel(m/s^2)");
+    u8g2.setCursor(3, oled_LineH * 4 + 2);
+    u8g2.print("X: ");
+    u8g2.print(AccX);
+    u8g2.print(", Y: ");
+    u8g2.print(AccY);
+    u8g2.print(", Z: ");
+    u8g2.print(AccZ);
+    u8g2.setCursor(3, oled_LineH * 5 + 2);
+    u8g2.println("Gyro(rps)");
+    u8g2.setCursor(3, oled_LineH * 6 + 2);
+    u8g2.print("X: ");
+    u8g2.print(GyroX, 1);
+    u8g2.print(", Y: ");
+    u8g2.print(GyroY);
+    u8g2.print(", Z: ");
+    u8g2.print(GyroZ);
+    u8g2.setCursor(3, oled_LineH * 7 + 2);
+    u8g2.print("Temp= ");
+    u8g2.print(Temp / 340.00 + 36.53);
+    u8g2.print(" ");
+    u8g2.print(char(176));
+    u8g2.setFont(u8g2_font_profont10_tf);
+    u8g2.print("C");
+    u8g2.sendBuffer(); // Send it out
+} // end displaying MPU-6050 information
+
+void displayOLED(double fps) {
+    if (currentMillis - oledPreviousMillis >= timePeriod005) {
+        oledPreviousMillis = currentMillis;
+
+        bLED = !bLED; // toggle LED State
+        digitalWrite(LED_BUILTIN, bLED);
+
+        displayAllGyro(fps); // displays all Gyro information and FPS
+    }
+}
+
+void unicornPuke2() {
+    FastLED.clear();
+    int effects = 30; // 30 seconds of display
+    while (effects > 0) {
+        // Update each LED with a random color
+        for (int i = 0; i < NUM_LED_PIN0; i++) {
+            led_Strip0[i] = CRGB(random(256), random(256), random(256));
+        }
+        for (int j = 0; j < NUM_LED_PIN1; j++) {
+            led_Strip1[j] = CRGB(random(256), random(256), random(256));
+        }
+        for (int k = 0; k < NUM_LED_PIN2; k++) {
+            led_Strip2[k] = CRGB(random(256), random(256), random(256));
+        }
+        FastLED.show();
+        effects--;
+    }
+} // end unicorn puke ver 2 function
+
+void fadeall() {
+    for (int i = 0; i < NUM_LED_PIN1; i++) {
+        led_Strip0[i].nscale8(200);
+        led_Strip1[i].nscale8(200);
+        led_Strip2[i].nscale8(200);
+    }
+}
+
+void cylondemo() {
+    FastLED.clear();
+    // First slide the led in one direction
+    for (int i = 0; i < NUM_LED_PIN1; i++) {
+        led_Strip0[i] = CRGB::Red;
+        led_Strip1[i] = CRGB::Red;
+        led_Strip2[i] = CRGB::Red;
+        FastLED.show();
+        fadeall();
+        delay(5);
+    }
+    // Now go in the other direction.
+    for (int i = NUM_LED_PIN1 - 1; i >= 0; i--) {
+        led_Strip0[i] = CRGB::Red;
+        led_Strip1[i] = CRGB::Red;
+        led_Strip2[i] = CRGB::Red;
+        FastLED.show();
+        fadeall();
+        delay(5);
+    }
+} // end cylon demo function
+
+void blinkingPrimaryColors2() {
+    const int blinkInterval = 250; // Blink interval in milliseconds
+    FastLED.clear();
+    int effects = 15; // 15 seconds of display
+    while (effects > 0) {
+        static int colorIndex = 0;
+        CRGB currentColor;
+        if (colorIndex == 0) {
+            currentColor = CRGB::Red;
+            colorIndex = 1;
+        }
+        else if (colorIndex == 1) {
+            currentColor = CRGB::Green;
+            colorIndex = 2;
+        }
+        else if (colorIndex == 2) {
+            currentColor = CRGB::Blue;
+            colorIndex = 0;
+        }
+        fill_solid(led_Strip0, NUM_LED_PIN0, currentColor);
+        fill_solid(led_Strip1, NUM_LED_PIN1, currentColor);
+        fill_solid(led_Strip2, NUM_LED_PIN2, currentColor);
+        FastLED.show();
+        delay(blinkInterval);
+        FastLED.clear();
+        FastLED.show();
+        delay(blinkInterval);
+        effects--;
+    }
+} // end blinkingPrimaryColors ver 2 function
+
+void christmasTheme2() {
+    const int twinkleProbability = 50; // Probability of twinkle effect (out of 100)
+    const int twinkleDelay = 200;      // Delay between twinkle effect in milliseconds
+    int effects = 40;
+    FastLED.clear();
+    CRGB redColor = CRGB::Red;
+    CRGB greenColor = CRGB::Green;
+    CRGB whiteColor = CRGB::White;
+    while (effects >= 0) {
+        // Light up LEDs with alternating red and green colors
+        for (int i = 0; i < NUM_LED_PIN0; i += 2) {
+            led_Strip0[i] = redColor;
+            led_Strip0[i + 1] = greenColor;
+        }
+        for (int j = 0; j < NUM_LED_PIN1; j += 2) {
+            led_Strip1[j] = redColor;
+            led_Strip1[j + 1] = greenColor;
+        }
+        for (int k = 0; k < NUM_LED_PIN2; k += 2) {
+            led_Strip2[k] = redColor;
+            led_Strip2[k + 1] = greenColor;
+        }
+
+        if (random(100) < twinkleProbability) {
+            int randomLED0 = random(NUM_LED_PIN0);
+            int randomLED1 = random(NUM_LED_PIN1);
+            int randomLED2 = random(NUM_LED_PIN2);
+            led_Strip0[randomLED0] = whiteColor;
+            led_Strip1[randomLED1] = whiteColor;
+            led_Strip2[randomLED2] = whiteColor;
+            delay(twinkleDelay);
+        }
+        FastLED.show();
+        delay(1);
+        effects--;
+    }
+} // end Christmmas theme ver 2 function
+
+void fadingBlue() {
+    FastLED.clear();
+    static boolean pulse = 0;
+    int effects = 120;
+    while (effects >= 0) {
+        EVERY_N_MILLISECONDS_I(timingFade, 1) {
+            pulse = !pulse;
+            if (pulse) {
+                timingFade.setPeriod(700); // time to hold before fading
+                for (int i = 0; i < NUM_LED_PIN0; i++) {
+                    led_Strip0[i] = CRGB::DarkBlue;
+                }
+                for (int j = 0; j < NUM_LED_PIN1; j++) {
+                    led_Strip1[j] = CRGB::DarkBlue;
+                }
+                for (int k = 0; k < NUM_LED_PIN2; k++) {
+                    led_Strip2[k] = CRGB::DarkBlue;
+                }
+            }
+            else  {
+                timingFade.setPeriod(1000);
+            }
+        }
+        if (pulse == 0) {
+            EVERY_N_MILLISECONDS(10) {
+                for (int i = 0; i < NUM_LED_PIN0; i++) {
+                    led_Strip0[i].fadeToBlackBy(12); // fade out
+                }
+                for (int j = 0; j < NUM_LED_PIN1; j++) {
+                    led_Strip1[j].fadeToBlackBy(12); // fade out
+                }
+                for (int k = 0; k < NUM_LED_PIN2; k++) {
+                    led_Strip2[k].fadeToBlackBy(12); // fade out
+                }
+            }
+        }
+        FastLED.show();
+        delay(1);
+        effects--;
+    }
+} // end fading blue light function
+
+void redAlert2() {
+    static boolean pulse = 0;
+    int effects = 120;
+    while (effects >= 0) {
+        EVERY_N_MILLISECONDS_I(timingFade, 1) {
+            pulse = !pulse;
+            if (pulse) {
+                timingFade.setPeriod(750); // time to hold before fading
+                for (int i = 0; i < NUM_LED_PIN0; i++) {
+                    led_Strip0[i] = CRGB::Red;
+                }
+                for (int j = 0; j < NUM_LED_PIN1; j++) {
+                    led_Strip1[j] = CRGB::Red;
+                }
+                for (int k = 0; k < NUM_LED_PIN2; k++) {
+                    led_Strip2[k] = CRGB::Red;
+                }
+            }
+            else {
+                timingFade.setPeriod(1000);
+            }
+        }
+        if (pulse == 0) {
+            EVERY_N_MILLISECONDS(10) {
+                for (int i = 0; i < NUM_LED_PIN0; i++) {
+                    led_Strip0[i].fadeToBlackBy(12); // fade out
+                }
+                for (int j = 0; j < NUM_LED_PIN1; j++) {
+                    led_Strip1[j].fadeToBlackBy(12); // fade out
+                }
+                for (int k = 0; k < NUM_LED_PIN2; k++) {
+                    led_Strip2[k].fadeToBlackBy(12); // fade out
+                }
+            }
+        }
+        FastLED.show();
+        delay(1);
+        effects--;
+    }
+} // end of red alert ver 2 fading red light
+
+void sparkles(uint8_t sparkel_duration, uint8_t sparkel_amount, uint8_t sparkel_spread) {
+    int effects = 30;
+    FastLED.clear();
+    static uint8_t sparkle_pixel0;
+    static uint8_t sparkle_pixel1;
+    static uint8_t sparkle_pixel2;
+
+    while (effects > 0) {
+        EVERY_N_MILLISECONDS_I(timingObj, 1) {
+            timingObj.setPeriod(sparkel_duration);
+            led_Strip0[sparkle_pixel0] = CRGB::Black;
+            led_Strip1[sparkle_pixel1] = CRGB::Black;
+            led_Strip2[sparkle_pixel2] = CRGB::Black;
+            uint8_t previous_pixel0 = sparkle_pixel0;
+            uint8_t previous_pixel1 = sparkle_pixel1;
+            uint8_t previous_pixel2 = sparkle_pixel2;
+
+            while (previous_pixel0 == sparkle_pixel0) { // pixel can't repeat
+                sparkle_pixel0 = random8(NUM_LED_PIN0 - 23);
+            }
+            while (previous_pixel1 == sparkle_pixel1) { // pixel can't repeat
+                sparkle_pixel1 = random8(NUM_LED_PIN1);
+            }
+            while (previous_pixel2 == sparkle_pixel2) { // pixel can't repeat
+                sparkle_pixel2 = random8(NUM_LED_PIN2);
+            }
+            if (random8(100) < sparkel_amount) {
+                led_Strip0[sparkle_pixel0] = CHSV(random8(), random8(20, 200), random8(50, 255));
+                led_Strip1[sparkle_pixel1] = CHSV(random8(), random8(20, 200), random8(50, 255));
+                led_Strip2[sparkle_pixel2] = CHSV(random8(), random8(20, 200), random8(50, 255));
+                FastLED.show();
+            }
+            FastLED.show();
+        }
+        EVERY_N_MILLISECONDS(10) {
+            blur1d(led_Strip0, NUM_LED_PIN0, sparkel_spread); // spreads and fades out color over time
+            blur1d(led_Strip1, NUM_LED_PIN1, sparkel_spread); // spreads and fades out color over time
+            blur1d(led_Strip2, NUM_LED_PIN2, sparkel_spread); // spreads and fades out color over time
+            FastLED.show();
+        }
+        effects--;
+    }
+} // end sparkles function
+
+void fillLEDsFromPaletteColours(uint8_t colorIndex) {
+    int effects = 30;
+    while (effects > 0) {
+        for (int i = 0; i < NUM_LED_PIN0; i++) {
+            led_Strip0[i] = ColorFromPalette(currentPalette, colorIndex, BRIGHTNESS, currentBlending);
+            colorIndex += 3;
+        }
+        for (int j = 0; j < NUM_LED_PIN1; j++) {
+            led_Strip1[j] = ColorFromPalette(currentPalette, colorIndex, BRIGHTNESS, currentBlending);
+            colorIndex += 3;
+        }
+        for (int k = 0; k < NUM_LED_PIN2; k++) {
+            led_Strip2[k] = ColorFromPalette(currentPalette, colorIndex, BRIGHTNESS, currentBlending);
+            colorIndex += 3;
+        }
+        FastLED.show();
+        effects--;
+        delay(500);
+    }
+} // end fill LED from palette colours function
+
+void randomPalette(uint8_t startIndex) {
+    for (int i = 0; i < 16; i++) {
+        currentPalette[i] = CHSV(random8(), 255, random8());
+    }
+    fillLEDsFromPaletteColours(startIndex);
+} // end random colour palette function
+
+void blackWhiteStripePalette(uint8_t startIndex) {
+    fill_solid(currentPalette, 16, CRGB::Black);
+    currentPalette[0] = CRGB::White;
+    currentPalette[4] = CRGB::White;
+    currentPalette[8] = CRGB::White;
+    currentPalette[12] = CRGB::White;
+    fillLEDsFromPaletteColours(startIndex);
+} // end black white stripe palette function
+
+void purpleGreenPalette(uint8_t startIndex) {
+    CRGB purple = CHSV(HUE_PURPLE, 255, 255);
+    CRGB green = CHSV(HUE_GREEN, 255, 255);
+    CRGB black = CRGB::Black;
+    currentPalette = CRGBPalette16(
+        green, green, black, black,
+        purple, purple, black, black,
+        green, green, black, black,
+        purple, purple, black, black);
+    fillLEDsFromPaletteColours(startIndex);
+} // end purple and green palette function
+
+void redWhiteBluePalette(uint8_t startIndex) {
+    const TProgmemPalette16 myRedWhiteBluePalette_p PROGMEM = {
+        CRGB::Red,
+        CRGB::Gray, // 'white' is too bright compared to red and blue
+        CRGB::Blue,
+        CRGB::Black,
+
+        CRGB::Red,
+        CRGB::Gray,
+        CRGB::Blue,
+        CRGB::Black,
+
+        CRGB::Red,
+        CRGB::Red,
+        CRGB::Gray,
+        CRGB::Gray,
+        CRGB::Blue,
+        CRGB::Blue,
+        CRGB::Black,
+        CRGB::Black};
+
+    currentPalette = myRedWhiteBluePalette_p;
+    currentBlending = NOBLEND;
+    fillLEDsFromPaletteColours(startIndex);
+} // end red white and blue colour palette function
+
+void rainbowPalette(uint8_t startIndex) {
+    currentPalette = RainbowColors_p;
+    currentBlending = NOBLEND;
+    fillLEDsFromPaletteColours(startIndex);
+} // end rainbow colour palette function (kinda like rainbow puke)
+
+void rainbowStripePalette(uint8_t startIndex) {
+    currentPalette = RainbowStripeColors_p;
+    currentBlending = NOBLEND;
+    fillLEDsFromPaletteColours(startIndex);
+} // end rainbow stripe palette function
+
+void cloudColoursPalette(uint8_t startIndex) {
+    currentPalette = CloudColors_p;
+    currentBlending = NOBLEND;
+    fillLEDsFromPaletteColours(startIndex);
+} // end clouds colour palette function
+
+void partyColoursPalette(uint8_t startIndex) {
+    currentPalette = PartyColors_p;
+    currentBlending = NOBLEND;
+    fillLEDsFromPaletteColours(startIndex);
+} // end party colour palette function
+
+void lavaColoursPalette(uint8_t startIndex) {
+    currentPalette = LavaColors_p;
+    currentBlending = NOBLEND;
+    fillLEDsFromPaletteColours(startIndex);
+} // end laval colours palette function
+
+void forestColoursPalette(uint8_t startIndex) {
+    currentPalette = ForestColors_p;
+    currentBlending = NOBLEND;
+    fillLEDsFromPaletteColours(startIndex);
+} // end forest colour palette function
+
+void oceanColoursPalette(uint8_t startIndex) {
+    currentPalette = OceanColors_p;
+    currentBlending = NOBLEND;
+    fillLEDsFromPaletteColours(startIndex);
+} // end ocean colour palette function
+
+void heatColoursPalette(uint8_t startIndex) {
+    currentPalette = HeatColors_p;
+    currentBlending = NOBLEND;
+    fillLEDsFromPaletteColours(startIndex);
+} // end heat colour palette function
+
+// wrapper functions to be used for LED function randomizer
+void unicornPuke2Wrapper() {
+    Serial.println("Starting Unicorn Puke ver 2");
+    unicornPuke2();
+}
+void cylondemoWrapper() {
+    Serial.println("Starting Cylon Demo");
+    cylondemo();
+}
+void blinkingPrimaryColors2Wrapper() {
+    Serial.println("Starting Blinking Colours ver 2");
+    blinkingPrimaryColors2();
+}
+void christmasTheme2Wrapper() {
+    Serial.println("Starting Christmas Theme ver 2");
+    christmasTheme2();
+}
+void fadingBlueWrapper() {
+    Serial.println("Starting Fading Blue Light");
+    fadingBlue();
+}
+void redAlert2Wrapper() {
+    Serial.println("RED ALERT VERSION 2!!!");
+    redAlert2();
+}
+void sparklesWrapper() {
+    Serial.print("Starting sparkles");
+    sparkles(random8(80, 200), 100, 30);
+}
+
+void rainbowPaletteWrapper() {
+    Serial.println("Starting Rainbow Palette");
+    rainbowPalette(startIndex);
+}
+void rainbowStripePaletteWrapper() {
+    Serial.println("Starting Rainbow Stripe Palette");
+    rainbowStripePalette(startIndex);
+}
+void randomPaletteWrapper() {
+    Serial.println("Starting Random Palette");
+    randomPalette(startIndex);
+}
+void blackWhiteStripePaletteWrapper() {
+    Serial.println("Starting Black and White Stripe Palette");
+    blackWhiteStripePalette(startIndex);
+}
+void purpleGreenPaletteWrapper() {
+    Serial.println("Starting Purple and Green Palette");
+    purpleGreenPalette(startIndex);
+}
+void cloudColoursPaletteWrapper() {
+    Serial.println("Starting Cloud Colours");
+    cloudColoursPalette(startIndex);
+}
+void partyColoursPaletteWrapper() {
+    Serial.println("Starting Party Colours");
+    partyColoursPalette(startIndex);
+}
+void redWhiteBluePaletteWrapper() {
+    Serial.println("Starting Red White and Blue Colours");
+    redWhiteBluePalette(startIndex);
+}
+void heatColoursPaletteWrapper() {
+    Serial.println("Starting Heat Colours");
+    heatColoursPalette(startIndex);
+}
+void oceanColoursPaletteWrapper() {
+    Serial.println("Starting Ocean Colours");
+    oceanColoursPalette(startIndex);
+}
+void forestColoursPaletteWrapper() {
+    Serial.println("Starting Forest Colours");
+    forestColoursPalette(startIndex);
+}
+void lavaColoursPaletteWrapper() {
+    Serial.println("Starting Lava Colours");
+    lavaColoursPalette(startIndex);
+}
+
+struct Effect {
+    EffectFunction func;
+    EffectFunctionWithArgs funcWithArgs;
+    uint8_t arg1;
+    uint8_t arg2;
+    uint8_t arg3;
+};
+
+Effect effects[] = {
+    {unicornPuke2Wrapper, nullptr, 0, 0, 0},
+    {cylondemoWrapper, nullptr, 0, 0, 0},
+    {blinkingPrimaryColors2Wrapper, nullptr, 0, 0, 0},
+    {christmasTheme2Wrapper, nullptr, 0, 0, 0},
+    {fadingBlueWrapper, nullptr, 0, 0, 0},
+    {redAlert2Wrapper, nullptr, 0, 0, 0},
+    {sparklesWrapper, 0, 0, 0},
+    {rainbowPaletteWrapper, 0, 0, 0},
+    {rainbowStripePaletteWrapper, 0, 0, 0},
+    {randomPaletteWrapper, 0, 0, 0},
+    {blackWhiteStripePaletteWrapper, 0, 0, 0},
+    {purpleGreenPaletteWrapper, 0, 0, 0},
+    {cloudColoursPaletteWrapper, 0, 0, 0},
+    {partyColoursPaletteWrapper, 0, 0, 0},
+    {redWhiteBluePaletteWrapper, 0, 0, 0},
+    {heatColoursPaletteWrapper, 0, 0, 0},
+    {oceanColoursPaletteWrapper, 0, 0, 0},
+    {forestColoursPaletteWrapper, 0, 0, 0},
+    {lavaColoursPaletteWrapper, 0, 0, 0},
+    {nullptr, nullptr, 0, 0, 0} // Placeholder for ledStripTest
+}; // 19 effects so far
+
+void shuffleArray(int arr[], int size) {
+    for (int s = size - 1; s > 0; s--) {
+        int t = random(0, s + 1);
+        if (s != t) {
+            int temp = arr[s];
+            arr[s] = arr[t];
+            arr[t] = temp;
+        }
+    }
+} // end shffle array function
+
+bool checkGyroOrAccelData() {
+    int16_t previousGyroX, previousGyroY, previousAccX, previousAccY;
+    // Read gyro and accelerometer data
+    readMPUdata(); // reads the MPU-6050
+
+    // Define thresholds for change detection
+    const float gyroThreshold = 7.3;  // Adjust the threshold as needed
+    const float accelThreshold = 7.3; // Adjust the threshold as needed
+    // Check if gyro or accelerometer data has changed beyond the thresholds
+    if (abs(GyroX - previousGyroX) > gyroThreshold ||
+        abs(GyroY - previousGyroY) > gyroThreshold ||
+        abs(AccX - previousAccX) > accelThreshold ||
+        abs(AccY - previousAccY) > accelThreshold) {
+        // Data has changed
+        previousGyroX = GyroX;
+        previousGyroY = GyroY;
+        previousAccX = AccX;
+        previousAccY = AccY;
+        return true;
+    }
+
+    // Data has not changed
+    return false;
+} // end boolean to check if gyro or accel from mpu has changed position
+
+void randomizedLEDEffect() {
+    int numEffects = sizeof(effectIndices) / sizeof(effectIndices[0]);
+    // Serial.println("Shuffling LED array");
+    // Serial.println("This is the randomized list");
+    shuffleArray(effectIndices, numEffects); // Shuffle the effect order to create a randomized sequence
+
+    bool gyroOrAccelChanged = checkGyroOrAccelData();
+
+    if (!gyroOrAccelChanged) {
+        for (int i = 0; i < numEffects; i++) {
+            int effectIndex = effectIndices[i];
+
+            if (effects[effectIndex].func) {
+                effects[effectIndex].func();
+            }
+            else if (effects[effectIndex].funcWithArgs) {
+                effects[effectIndex].funcWithArgs(effects[effectIndex].arg1, effects[effectIndex].arg2, effects[effectIndex].arg3);
+            }
+        }
+    }
+} // end Random LED Display function
+
+void loop() {
+    FastLED.clear(); // clear whatever is on the LED strips whenever the loop starts and/or is restarted
+    startIndex = startIndex + 1; /* motion speed */
+
+    currentMillis = millis();
+
+    double fps = 0; // to start recording the fps of the display
+    double dStart = millis() / 1000.0; // record the start time
+
+    // ledStripTest(led_Strip0, NUM_LED_PIN0);
+    // ledStripTest(led_Strip1, NUM_LED_PIN1);
+    // ledStripTest(led_Strip2, NUM_LED_PIN2);
+
+    // KINDA WORKS: providfes LED Effects but the for loop does not disengage until after all LED effects are ran through
+    // random LED effects generator
+    if (currentMillis - lastGyroCheckTime >= timePeriod1) {
+        if (checkGyroOrAccelData()) {
+            // Data changed, disengage LED effect
+            ledEffectActive = false;
+        }
+        lastGyroCheckTime = currentMillis;
+    }
+
+    if (!ledEffectActive) {
+        // Start the LED effect or set ledEffectActive to true
+        randomizedLEDEffect(); // Execute the LED effects
+        ledEffectActive = true;
+    }
+
+    // WORKS: ALL STRIPS AT ONE TIME
+    // sparkles(random8(80, 200), 100, 30);
+    // unicornPuke2();
+    // KINDA WORKS: ALL STRIPS AT A TIME BUT LIMITED TO ONE LENGTH
+    // cylondemo();
+    // WORKS: ALL STIPS AT ONE TIME
+    // blinkingPrimaryColors2();
+    // WORKS: ALL STRIPS AT ONE TIME BUT WITH LITTLE TWINKLE
+    // christmasTheme2();
+    // WORKS: ALL STIPS AT ONE TIME
+    // FadingBlue();
+    // RedAlert2();
+    // WORKS: ALL STIPS AT ONE TIME
+    // RandomPalette(startIndex);
+    // BlackWhiteStripePalette(startIndex);
+    // RedWhiteBluePalette(startIndex);
+    // PurpleGreenPalette(startIndex);
+    // RainbowPalette(startIndex);
+    // CloudColoursPalette(startIndex);
+    // RainbowStripePalette(startIndex);
+    // PartyColoursPalette(startIndex);
+    // HeatColoursPalette(startIndex);
+    // OceanColoursPalette(startIndex);
+    // ForestColoursPalette(startIndex);
+    // LavaColoursPalette(startIndex);
+
+    double dEnd = millis() / 1000.0; // record the completion time
+    fps = framesPerSecond(dEnd - dStart);
+    displayOLED(fps); // displays Gyro infomration and FPS using millis
+
+    Serial.println("Restarting Loop");
+} // end loop function

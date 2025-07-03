@@ -1,0 +1,465 @@
+#ifndef STANDUPTABLEMOVEMENT_H
+#define STANDUPTABLEMOVEMENT_H
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include "LEDeffects.h"
+#include "seeOLED.h"
+
+extern bool dataChanged; // Variable to store data change status
+
+JSONVar readings;
+
+Adafruit_MPU6050 mpu;
+
+sensors_event_t a, g, temp;
+
+float gyroX, gyroY, gyroZ;
+float accX, accY, accZ;
+float temperature;
+float accelBias[3] = {0, 0, 0};
+float gyroXerror = 0.45; // modified, was 0.35
+float gyroYerror = 0.15; // modified
+float gyroZerror = 0.05; // modified
+
+#define INTERRUPT_PIN 4 // interrupt connected to MPU-6050 // GPIO 4 on the ESP32
+int16_t previousGyroX = 0, previousGyroY = 0, previousAccX = 0, previousAccY = 0; // to help with providing an interrupt
+const int MPU6050_addr = 0x68; // to initialize the address of the MPU-6050
+
+const float gyroThreshold PROGMEM = 10.0;  // Original: 10.0 -> 7.3 // Adjust the threshold as needed for a change in the MPU movement
+const float accelThreshold PROGMEM = 10.0; // Original: 10.0 -> 7.3 // Adjust the threshold as needed for a change in the MPU movement
+
+long acc_total_vector;
+boolean set_gyro_angles = false;
+float angle_roll_acc, angle_pitch_acc;
+float angle_pitch, angle_roll;
+int angle_pitch_buffer, angle_roll_buffer;
+float angle_pitch_output, angle_roll_output;
+
+long loop_timer;
+unsigned long start = 0;
+
+const int relay1_LA1LHP_Pin PROGMEM = 27; // Relay controlling actuator #1 positive // it is actually pin 6 on the DOIT ESP32 Dev Kit V1 or GPIO27
+const int relay2_LA1LHM_Pin PROGMEM = 26; // Relay controlling actuator #1 negative // it is actually pin 7 on the DOIT ESP32 Dev Kit V1 or GPIO26
+const int relay3_LA2RHP_Pin PROGMEM = 25; // Relay controlling actuator #2 positive // it is actually pin 8 on the DOIT ESP32 Dev Kit V1 or GPIO25
+const int relay4_LA2RHM_Pin PROGMEM = 33; // Relay controlling actuator #2 negative // it is actually pin 9 on the DOIT ESP32 Dev Kit V1 or GPIO33
+const int threshold PROGMEM = 5; // Adjust this value according to your needs
+
+int currentPosition = 0;
+int previousPosition = 0;
+bool isMovingUp = false;
+bool isMovingDown = false;
+bool isTableLevel = false;
+
+static int absoluteX = abs(accX);
+static int absoluteY = abs(accY);
+static int newPosition = currentPosition;
+
+void testLEDsLevel() {
+    FastLED.clear();
+    for (int i = 0; i < NUM_LED_PIN1 + 1; i++) {
+        if (i < 110 || i > 175) {
+            led_Strip1[i] = CRGB::Black;
+            FastLED.show();
+        }
+        else {
+            led_Strip1[i] = CRGB::White;
+            FastLED.show();
+        }
+    }
+}; // end test LEDs length level
+
+void setLEDsLevel(void) {
+    FastLED.clear();
+    for (int i = 0; i < NUM_LED_PIN1 + 1; i++) {
+        if (i < 139 || i > 146) {
+            led_Strip1[i] = CRGB::Black;
+            FastLED.show();
+        }
+        else {
+            led_Strip1[i] = CRGB::Green;
+            FastLED.show();
+        }
+    }
+}; // end set LEDs level
+
+void setLEDsTiltedLeft(int left) {
+    FastLED.clear();
+    if (left == 1) {
+        for (int i = 0; i < NUM_LED_PIN1 + 1; i++) {
+            if (i < 149 || i > 153) {
+                led_Strip1[i] = CRGB::Black;
+                FastLED.show();
+            }
+            else {
+                led_Strip1[i] = CRGB::Orange;
+                FastLED.show();
+            }
+        }
+    }
+    else if (left == 2) {
+        for (int i = 0; i < NUM_LED_PIN1 + 1; i++) {
+            if (i < 154 || i > 158) {
+                led_Strip1[i] = CRGB::Black;
+                FastLED.show();
+            }
+            else {
+                led_Strip1[i] = CRGB::Red;
+                FastLED.show();
+            }
+        }
+    }
+}; // end set LEDs titled left
+
+void setLEDsTiltedRight(int right) {
+    FastLED.clear();
+    if (right == 1) {
+        for (int i = 0; i < NUM_LED_PIN1 + 1; i++) {
+            if (i < 132 || i > 136) {
+                led_Strip1[i] = CRGB::Black;
+                FastLED.show();
+            }
+            else {
+                led_Strip1[i] = CRGB::Orange;
+                FastLED.show();
+            }
+        }
+    }
+    else if (right == 2) {
+        for (int i = 0; i < NUM_LED_PIN1 + 1; i++) {
+            if (i < 127 || i > 131) {
+                led_Strip1[i] = CRGB::Black;
+                FastLED.show();
+            }
+            else {
+                led_Strip1[i] = CRGB::Red;
+                FastLED.show();
+            }
+        }
+    }
+}; // end set LEDs titled right
+
+void setLEDsTiltedForward(int fwd) {
+    FastLED.clear();
+    if (fwd == 1) {
+        for (int i = 0; i < NUM_LED_PIN1 + 1; i++) {
+            if ((i < 171 || i > 175) && (i < 110 || i > 114)) {
+                led_Strip1[i] = CRGB::Black;
+                FastLED.show();
+            }
+            else {
+                led_Strip1[i] = CRGB::Orange;
+                FastLED.show();
+            }
+        }
+    }
+    else if (fwd == 2) {
+        for (int i = 0; i < NUM_LED_PIN1 + 1; i++) {
+            if ((i < 165 || i > 170) && (i < 115 || i > 119)) {
+                led_Strip1[i] = CRGB::Black;
+                FastLED.show();
+            }
+            else {
+                led_Strip1[i] = CRGB::Red;
+                FastLED.show();
+            }
+        }
+    }
+}; // end set LEDs titled forward
+
+void setLEDsTiltedBackward(int back) {
+    FastLED.clear();
+    if (back == 1) {
+        for (int i = 0; i < NUM_LED_PIN1 + 1; i++) {
+            if ((i < 176 || i > 180) && (i < 105 || i > 109)) {
+                led_Strip1[i] = CRGB::Black;
+                FastLED.show();
+            }
+            else {
+                led_Strip1[i] = CRGB::Orange;
+                FastLED.show();
+            }
+        }
+    }
+    else if (back == 2) {
+        for (int i = 0; i < NUM_LED_PIN1 + 1; i++) {
+            if ((i < 181 || i > 185) && (i < 100 || i > 104)) {
+                led_Strip1[i] = CRGB::Black;
+                FastLED.show();
+            }
+            else {
+                led_Strip1[i] = CRGB::Red;
+                FastLED.show();
+            }
+        }
+    }
+}; // end set LEDs titled backward
+
+void displayPosition(void) {
+    if ((angle_roll_output < 1.00) && (angle_roll_output > -1.00)) {
+        setLEDsLevel();
+    }
+    else if ((angle_roll_output > -2.00) && (angle_roll_output < -1.01)) {
+        setLEDsTiltedLeft(1);
+    }
+    else if (angle_roll_output < -2.01) {
+        setLEDsTiltedLeft(2);
+    }
+    else if ((angle_roll_output > 1.01) && (angle_roll_output < 2.00)) {
+        setLEDsTiltedRight(1);
+    }
+    else if (angle_roll_output > 2.01) {
+        setLEDsTiltedRight(2);
+    }
+    else if ((angle_pitch_output > 1.01) && (angle_pitch_output < 2.00)) {
+        setLEDsTiltedForward(1);
+    }
+    else if (angle_pitch_output < -2.01) {
+        setLEDsTiltedForward(2);
+    }
+    else if (angle_pitch_output < -2.01) {
+        setLEDsTiltedBackward(1);
+    }
+    else if ((angle_pitch_output > -2.00) && (angle_pitch_output < -1.01)) {
+        setLEDsTiltedBackward(2);
+    }
+}; // end display position function
+
+void initMPU() {
+    if (!mpu.begin()) {
+        Serial.println("Failed to find MPU6050 chip using Adafruit_MPU6050 library!");
+        while (1) {
+            delay(10);
+        }
+    }
+    mpu.setCycleRate(MPU6050_CYCLE_40_HZ);
+    mpu.setAccelerometerRange(MPU6050_RANGE_16_G);
+    mpu.setGyroRange(MPU6050_RANGE_2000_DEG);
+    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+};
+
+void imuOffset() {
+    for (int i = 0; i < 1000; i++) {
+        sensors_event_t a, g, temp;
+        mpu.getEvent(&a, &g, &temp);
+        accelBias[0] += a.acceleration.x;
+        accelBias[1] += a.acceleration.y;
+        accelBias[2] += a.acceleration.z - (float)9.81; // Subtract gravity
+        delay(20);
+    }
+    accelBias[0] /= 1000;
+    accelBias[1] /= 1000;
+    accelBias[2] /= 1000;
+};
+
+String getGyroReadings() {
+    mpu.getEvent(&a, &g, &temp);
+
+    float gyroX_temp = g.gyro.x;
+    if (abs(gyroX_temp) > gyroXerror) {
+        gyroX += gyroX_temp / 50.00;
+    }
+
+    float gyroY_temp = g.gyro.y;
+    if (abs(gyroY_temp) > gyroYerror) {
+        gyroY += gyroY_temp / 70.00;
+    }
+
+    float gyroZ_temp = g.gyro.z;
+    if (abs(gyroZ_temp) > gyroZerror) {
+        gyroZ += gyroZ_temp / 90.00;
+    }
+
+    readings["gyroX"] = String(gyroX);
+    readings["gyroY"] = String(gyroY);
+    readings["gyroZ"] = String(gyroZ);
+
+    String jsonString = JSON.stringify(readings);
+    return jsonString;
+};
+
+String getAccReadings() {
+    mpu.getEvent(&a, &g, &temp);
+    accX = a.acceleration.x;
+    accY = a.acceleration.y;
+    accZ = a.acceleration.z;
+    readings["accX"] = String(accX);
+    readings["accY"] = String(accY);
+    readings["accZ"] = String(accZ);
+    String accString = JSON.stringify(readings);
+    return accString;
+};
+
+String getTemperature() {
+    mpu.getEvent(&a, &g, &temp);
+    temperature = temp.temperature;
+    return String(temperature);
+};
+
+void readMPUdata() {
+    getAccReadings();
+    getGyroReadings();
+    getTemperature();
+}; // end reading MPU data
+
+void checkMPUData(bool &dataChanged) {
+    readMPUdata(); // reads the MPU-6050 // Read gyro and accelerometer data
+    if (abs(gyroX - previousGyroX) > gyroThreshold || abs(gyroY - previousGyroY) > gyroThreshold || abs(accX - previousAccX) > accelThreshold || abs(accY - previousAccY) > accelThreshold) {
+        previousGyroX = gyroX;
+        previousGyroY = gyroY;
+        previousAccX = accX;
+        previousAccY = accY;
+        dataChanged = true;
+    }
+    else {
+        dataChanged = false;
+    }
+}; // end boolean to check if gyro or accel from mpu has changed position
+
+void moveUp(void) {
+    digitalWrite(relay1_LA1LHP_Pin, LOW);
+    digitalWrite(relay2_LA1LHM_Pin, HIGH); // redundant protection
+    digitalWrite(relay3_LA2RHP_Pin, LOW);
+    digitalWrite(relay4_LA2RHM_Pin, HIGH); // redundant protection
+    displayPosition();
+    isMovingUp = true;
+    isMovingDown = false;
+} // end move up linear actuators function
+
+void moveDown(void) {
+    digitalWrite(relay1_LA1LHP_Pin, HIGH); // redundant protection
+    digitalWrite(relay2_LA1LHM_Pin, LOW);
+    digitalWrite(relay3_LA2RHP_Pin, HIGH); // redundant protection
+    digitalWrite(relay4_LA2RHM_Pin, LOW);
+    displayPosition();
+    isMovingUp = false;
+    isMovingDown = true;
+} // end move down linear actuator function
+
+void stopMovement(void) {
+    digitalWrite(relay1_LA1LHP_Pin, HIGH);
+    digitalWrite(relay2_LA1LHM_Pin, HIGH);
+    digitalWrite(relay3_LA2RHP_Pin, HIGH);
+    digitalWrite(relay4_LA2RHM_Pin, HIGH);
+    displayPosition();
+    isMovingUp = false;
+    isMovingDown = false;
+} // end stopping movment function
+
+void tableMovement(void) {
+    readMPUdata();
+    angle_pitch += gyroX * 0.0000611;
+    angle_roll += gyroY * 0.0000611;
+
+    angle_pitch += angle_roll * sin(gyroZ * 0.000001066);
+    angle_roll -= angle_pitch * sin(gyroZ * 0.000001066);
+
+    acc_total_vector = sqrt((accX * accX) + (accY * accY) + (accZ * accZ));
+    angle_pitch_acc = asin((float)accY / acc_total_vector) * 57.296;
+    angle_roll_acc = asin((float)accX / acc_total_vector) * -57.296;
+
+    angle_pitch_acc -= 0.0;
+    angle_roll_acc -= 0.0;
+
+    if (set_gyro_angles) {
+        angle_pitch = angle_pitch * 0.9996 + angle_pitch_acc * 0.0004;
+        angle_roll = angle_roll * 0.9996 + angle_roll_acc * 0.0004;
+    }
+    else {
+        angle_pitch = angle_pitch_acc;
+        angle_roll = angle_roll_acc;
+        set_gyro_angles = true;
+    }
+
+    angle_pitch_output = angle_pitch_output * 0.9 + angle_pitch * 0.1;
+    angle_roll_output = angle_roll_output * 0.9 + angle_roll * 0.1;
+
+    while (micros() - loop_timer < 4000) ;
+    loop_timer = micros();
+
+    int absoluteX = abs(angle_roll_output);
+    int absoluteY = abs(angle_pitch_output);
+
+    if (absoluteX > threshold) {
+        if (accX < 0) {
+            newPosition--;
+        }
+        else {
+            newPosition++;
+        }
+    }
+
+    if (absoluteY > threshold) {
+        if (accY < 0) {
+            newPosition--;
+        }
+        else {
+            newPosition++;
+        }
+    }
+
+    if (newPosition != currentPosition) {
+        stopMovement();
+        currentPosition = newPosition;
+        if (currentPosition > previousPosition) {
+            moveUp();
+        }
+        else if (currentPosition < previousPosition) {
+            moveDown();
+        }
+        previousPosition = currentPosition;
+    }
+
+    if (absoluteX <= threshold && absoluteY <= threshold) {
+        isTableLevel = true;
+    }
+    else {
+        isTableLevel = false;
+    }
+
+    Serial.println(F("\nSend 'U'/'u' for Up, 'D'/'d' for Down, 'S'/'s' for STOP"));
+
+    if (Serial.available()) {
+        char command = Serial.read();
+        while (Serial.available()) {
+            Serial.read();
+        }
+
+        Serial.print(F("Received Command: "));
+        Serial.println(command);
+
+        switch (command) {
+        case 'U':
+            Serial.println(F("Moving Up"));
+            moveUp();
+            break;
+        case 'u':
+            Serial.println(F("Moving Up"));
+            moveUp();
+            break;
+        case 'D':
+            Serial.println(F("Moving Down"));
+            moveDown();
+            break;
+        case 'd':
+            Serial.println(F("Moving Down"));
+            moveDown();
+            break;
+        case 'S':
+            Serial.println(F("Stopping Movement"));
+            stopMovement();
+            break;
+        case 's':
+            Serial.println(F("Stopping Movement"));
+            stopMovement();
+            break;
+        default:
+            Serial.println(F("Invalid Command"));
+            break;
+        }
+    }
+    while (!Serial.available()) ; // wait for data
+};        // end table movement function
+
+#endif // STANDUPTABLEMOVEMENT_H

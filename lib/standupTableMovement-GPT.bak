@@ -1,0 +1,701 @@
+#ifndef STANDUPTABLEMOVEMENT_H
+#define STANDUPTABLEMOVEMENT_H
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include "IMU_Zero.h"
+#include "IMU_Error.h"
+#include "LEDeffects.h"
+
+// legend: ..Point1 = left, ..Point2 = right
+const int middlePoint1 = 143;
+const int orangePoint1 = 149;
+const int redPoint1 = 154;
+const int tiltFwdRedPoint1 = 165;
+const int tiltFwdOrangePoint1 = 170;
+const int endPoint1 = 175;
+const int tiltBckOrangePoint1 = 180;
+const int tiltBckRedPoint1 = 185;
+const int middlePoint2 = 142;
+const int orangePoint2 = 137;
+const int redPoint2 = 132;
+const int tiltFwdRedPoint2 = 120;
+const int tiltFwdOrangePoint2 = 115;
+const int endPoint2 = 110;
+const int tiltBckOrangePoint2 = 105;
+const int tiltBckRedPoint2 = 100;
+
+#include "seeOLED.h"
+void displayAllGyro2(); // Declare the missing function
+
+extern bool dataChanged; // Variable to store data change status
+
+#define INTERRUPT_PIN 4 // interrupt connected to MPU-6050 // GPIO 4 on the ESP32
+// const int MPU6050_addr = 0x68; // to initialize the address of the MPU-6050
+JSONVar readings; // Json Variable to Hold Sensor Readings
+Adafruit_MPU6050 mpu;
+sensors_event_t a, g, temp;
+
+float gyroX, gyroY, gyroZ;
+float accX, accY, accZ;
+float temperature;
+// float accelBias[3] = {0, 0, 0};
+const float gyroThreshold PROGMEM = 10.0;  // Original: 10.0 -> 7.3 // Adjust the threshold as needed for a change in the MPU movement
+const float accelThreshold PROGMEM = 10.0; // Original: 10.0 -> 7.3 // Adjust the threshold as needed for a change in the MPU movement
+float gyroXerror = 0.45; // original float gyroXerror = 0.07; // modified, was 0.35 and to 0.45
+float gyroYerror = 0.05; // original float gyroYerror = 0.03; // modified to .015
+float gyroZerror = 0.01; // original float gyroZerror = 0.01; // modified to 0.05
+
+int16_t previousGyroX = 0, previousGyroY = 0, previousAccX = 0, previousAccY = 0; // to help with providing an interrupt
+long acc_total_vector;
+boolean set_gyro_angles = false;
+float angle_roll_acc, angle_pitch_acc;
+float angle_pitch, angle_roll;
+int angle_pitch_buffer, angle_roll_buffer;
+float angle_pitch_output, angle_roll_output;
+
+long loop_timer;
+unsigned long start = 0;
+
+// Legend: LA = Linear Actuator, LHP = Left Actuator Positive, LHM = Left Actuator Negative, RHP = Right Actuator Positive, RHM = Right Actuator Negative
+const int relay1_LA1LHP_Pin = 27; // Relay controlling actuator #1 positive // it is actually pin 6 on the DOIT ESP32 Dev Kit V1 or GPIO27
+const int relay2_LA1LHM_Pin = 26; // Relay controlling actuator #1 negative // it is actually pin 7 on the DOIT ESP32 Dev Kit V1 or GPIO26
+const int relay3_LA2RHP_Pin = 25; // Relay controlling actuator #2 positive // it is actually pin 8 on the DOIT ESP32 Dev Kit V1 or GPIO25
+const int relay4_LA2RHM_Pin = 33; // Relay controlling actuator #2 negative // it is actually pin 9 on the DOIT ESP32 Dev Kit V1 or GPIO33
+
+const int threshold = 5; // Adjust this value according to your needs
+int currentPosition = 0;
+int previousPosition = 0;
+int initialPosition = 0;
+int newPosition = currentPosition;
+
+bool isMovingUpLeft = false;
+bool isMovingDownLeft = false;
+bool isMovingUpRight = false;
+bool isMovingDownRight = false;
+bool isStopMovementLeft = false;
+bool isStopMovementRight = false;
+bool isStopMovement = false;
+bool isMovingUp = false;
+bool isMovingDown = false;
+bool isTableLevel = false;
+
+const int BASE_SPEED = 100; // Base speed for linear actuator movement = 100%
+const int MAX_SPEED_ADJUSTMENT = 15; // Maximum speed adjustment for linear actuator movement = 15%
+
+void testLEDsLevel(void)
+{
+    // visual total length of the leveling LEDs is from LED 110 -> 175 then my middle points are LEDs 142-143
+    FastLED.clear();
+    for (int i = 0; i <= middlePoint1; i++) {
+        // Check if indices are within bounds before writing to them
+        if (middlePoint2 - i >= 0 && middlePoint1 - i < NUM_LED_PIN1) {
+            if (middlePoint2 - i < endPoint2) {
+                led_Strip1[middlePoint2 - i] = CRGB::Black;
+            }
+            else {
+                led_Strip1[middlePoint2 - i] = CRGB::White;
+            }
+        }
+        if (middlePoint1 + i >= 0 && middlePoint1 + i < NUM_LED_PIN1) {
+            if (middlePoint1 + i > endPoint1) {
+                led_Strip1[middlePoint1 + i] = CRGB::Black;
+            }
+            else {
+                led_Strip1[middlePoint1 + i] = CRGB::White;
+            }
+        }
+        FastLED.show();
+    }
+}; // end test LEDs length level
+
+void setLEDsLevel(void)
+{
+    FastLED.clear();
+    // if visual total length of the leveling LEDs is from LED 110 -> 175 then my middle points are LEDs 142-143
+    // for the level LEDs to be 10 LEDs, I would need to add 4 LEDs to the left and 4 LEDs to the right = 143+4 and 142-4 = 146-139
+    // Start from the middle and expand outwards
+    for (int i = 0; i <= middlePoint1; i++) {
+        // Check if indices are within bounds before writing to them
+        if (middlePoint2 - i >= 0 && middlePoint2 - i < NUM_LED_PIN1) {
+            if (middlePoint2 - i < orangePoint2) {
+                led_Strip1[middlePoint2 - i] = CRGB::Black;
+            }
+            else {
+                led_Strip1[middlePoint2 - i] = CRGB::Green;
+            }
+        }
+        if (middlePoint1 + i >= 0 && middlePoint1 + i < NUM_LED_PIN1) {
+            if (middlePoint1 + i > orangePoint1) {
+                led_Strip1[middlePoint1 + i] = CRGB::Black;
+            }
+            else {
+                led_Strip1[middlePoint1 + i] = CRGB::Green;
+            }
+        }
+        FastLED.show();
+    }
+}; // end set LEDs level
+
+void setLEDsTiltedLeft(int left)
+{
+    FastLED.clear();
+    // then I would add 2 LEDs to the left and 2 LEDs to the right for blanking spots from the level LEDs = 138-1 and 147+1 = 147-148 and 138-137
+    // for the small tilt left to be 5 LEDs, 149-153 (left == 1).
+    // for the large tilt left to be 5 LEDs, 154-158 (left == 2)
+    CRGB colour1;
+    CRGB colour2;
+    CRGB colour3;
+
+    if (left == 1) {
+        colour1 = CRGB::Green;
+        colour2 = CRGB::Orange;
+        // Turn on the LEDs within the range
+        for (int i = 0; i < NUM_LED_PIN1; i++) {
+            if (i >= middlePoint1 && i <= orangePoint1) {
+                led_Strip1[i] = colour1;
+                FastLED.show();
+            }
+            else if (i >= (orangePoint1 - 1) && i <= redPoint1) {
+                led_Strip1[i] = colour2;
+                FastLED.show();
+            }
+        }
+    }
+    else if (left == 2) {
+        colour1 = CRGB::Green;
+        colour2 = CRGB::Orange;
+        colour3 = CRGB::Red;
+        // Turn on the LEDs within the range
+        for (int i = 0; i < NUM_LED_PIN1; i++) {
+            if (i >= middlePoint1 && i <= orangePoint1) {
+                led_Strip1[i] = colour1;
+                FastLED.show();
+            }
+            else if (i >= (orangePoint1 - 1) && i <= redPoint1) {
+                led_Strip1[i] = colour2;
+                FastLED.show();
+            }
+            else if (i >= (redPoint1 - 1) && i <= redPoint1 + 5) {
+                led_Strip1[i] = colour3;
+                FastLED.show();
+            }
+        }
+    }
+}; // end set LEDs titled left
+
+void setLEDsTiltedRight(int right)
+{
+    FastLED.clear();
+    // for the small tilt right to be 5 LEDs, 136-132.
+    // for the large tilt right to be 5 LEDs, 131-127.
+    CRGB colour1;
+    CRGB colour2;
+    CRGB colour3;
+
+    if (right == 1) {
+        colour1 = CRGB::Green;
+        colour2 = CRGB::Orange;
+        // Turn on the LEDs within the range
+        for (int i = 0; i < NUM_LED_PIN1; i++) {
+            if (i <= middlePoint2 && i >= orangePoint2) {
+                led_Strip1[i] = colour1;
+                FastLED.show();
+            }
+            else if (i <= (orangePoint2 + 1) && i >= redPoint2) {
+                led_Strip1[i] = colour2;
+                FastLED.show();
+            }
+        }
+    }
+    else if (right == 2) {
+        colour1 = CRGB::Green;
+        colour2 = CRGB::Orange;
+        colour3 = CRGB::Red;
+        // Turn on the LEDs within the range
+        for (int i = 0; i < NUM_LED_PIN1; i++) {
+            if (i <= middlePoint2 && i >= orangePoint2) {
+                led_Strip1[i] = colour1;
+                FastLED.show();
+            }
+            else if (i <= (orangePoint2 + 1) && i >= redPoint2) {
+                led_Strip1[i] = colour2;
+                FastLED.show();
+            }
+            else if (i <= (redPoint2 + 1) && i >= redPoint2 - 5) {
+                led_Strip1[i] = colour3;
+                FastLED.show();
+            }
+        }
+    }
+}; // end set LEDs titled right
+
+void setLEDsTiltedForward(int fwd)
+{
+    FastLED.clear();
+    // if visual total length of the leveling LEDs is from LED 110->175
+    // for the tilt forward to be 5 LEDs, I can use the 175-171 and 110-114.
+    // for the tilt forward more to be 5 LEDs, I can use the 170-165 and 115-119.
+    CRGB colour1;
+    CRGB colour2;
+
+    if (fwd == 1) {
+        colour1 = CRGB::Orange;
+        // Turn on the LEDs within the range
+        for (int i = 0; i < NUM_LED_PIN1; i++) {
+            if ((i >= tiltFwdOrangePoint1 && i <= endPoint1) || (i >= endPoint2 && i <= tiltFwdOrangePoint2)) {
+                led_Strip1[i] = colour1;
+                FastLED.show();
+            }
+        }
+    }
+    else if (fwd == 2) {
+        colour1 = CRGB::Orange;
+        colour2 = CRGB::Red;
+        // Turn on the LEDs within the range
+        for (int i = 0; i < NUM_LED_PIN1; i++) {
+            if ((i >= tiltFwdOrangePoint1 && i <= endPoint1 ) || (i >= endPoint2 && i <= tiltFwdOrangePoint2)) {
+                led_Strip1[i] = colour1;
+                FastLED.show();
+            }
+            else if ((i <= (tiltFwdOrangePoint1 - 1) && i >= tiltFwdRedPoint1) || (i >= (tiltFwdOrangePoint2 + 1) && i <= tiltFwdRedPoint2)) {
+                led_Strip1[i] = colour2;
+                // FastLED.show();
+            }
+            FastLED.show();
+        }
+    }
+}; // end set LEDs titled forward
+
+void setLEDsTiltedBackward(int back)
+{
+    FastLED.clear();
+    // if visual total length of the leveling LEDs is from LED 110->175
+    // for the tilt backward to be 5 LEDs, I can use the 176-180 and 109-105.
+    // for the tilt backward more to be 5 LEDs, I can use the 181-185 and 104-100.
+    CRGB colour1;
+    CRGB colour2;
+
+    if (back == 1) {
+        colour1 = CRGB::Orange;
+        // Turn on the LEDs within the range
+        for (int i = 0; i < NUM_LED_PIN1; i++) {
+            if ((i >= (endPoint1 + 1) && i <= tiltBckOrangePoint1) || (i <= (endPoint2 - 1) && i >= tiltBckOrangePoint2)) {
+                led_Strip1[i] = colour1;
+                FastLED.show();
+            }
+        }
+    }
+    else if (back == 2) {
+        colour1 = CRGB::Orange;
+        colour2 = CRGB::Red;
+        // Turn on the LEDs within the range
+        for (int i = 0; i < NUM_LED_PIN1; i++) {
+            if ((i >= (endPoint1 + 1) && i <= tiltBckOrangePoint1) || (i <= (endPoint2 - 1) && i >= tiltBckOrangePoint2)) {
+                led_Strip1[i] = colour1;
+                FastLED.show();
+            }
+            else if ((i >= (tiltBckOrangePoint1 + 1) && i <= tiltBckRedPoint1) || (i <= (tiltBckOrangePoint2 - 1) && i >= tiltBckRedPoint2)) {
+                led_Strip1[i] = colour2;
+                FastLED.show();
+            }
+        }
+    }
+}; // end set LEDs titled backward
+
+void displayPosition(void) {
+    if ((angle_roll_output < 1.00) && (angle_roll_output > -1.00)) {
+        setLEDsLevel();
+        return;
+    }
+    else if ((angle_roll_output > -2.00) && (angle_roll_output < -1.01)) {
+        setLEDsTiltedLeft(1);
+        return;
+    }
+    else if (angle_roll_output < -2.01) {
+        setLEDsTiltedLeft(2);
+        return;
+    }
+    else if ((angle_roll_output > 1.01) && (angle_roll_output < 2.00)) {
+        setLEDsTiltedRight(1);
+        return;
+    }
+    else if (angle_roll_output > 2.01) {
+        setLEDsTiltedRight(2);
+        return;
+    }
+    else if ((angle_pitch_output > 1.01) && (angle_pitch_output < 2.00)) {
+        setLEDsTiltedForward(1);
+        return;
+    }
+    else if (angle_pitch_output < -2.01) {
+        setLEDsTiltedForward(2);
+        return;
+    }
+    else if (angle_pitch_output < -2.01) {
+        setLEDsTiltedBackward(1);
+        return;
+    }
+    else if ((angle_pitch_output > -2.00) && (angle_pitch_output < -1.01)) {
+        setLEDsTiltedBackward(2);
+        return;
+    }
+}; // end display position function
+
+void initMPU(void) {
+    if (!mpu.begin()) {
+        Serial.println("Failed to find MPU6050 chip using Adafruit_MPU6050 library!");
+        while (1) {
+            delay(10);
+        }
+    }
+    mpu.setCycleRate(MPU6050_CYCLE_40_HZ);
+    mpu.setAccelerometerRange(MPU6050_RANGE_16_G);
+    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+    mpu.setFilterBandwidth(MPU6050_BAND_44_HZ);
+    // IMUSetup(); // this function is to calculate what it would take ot zero-ize the IMU
+};
+
+void imuOffset(void) {
+    calculate_IMU_error();
+    // for (int i = 0; i < 1000; i++) {
+    //     sensors_event_t a, g, temp;
+    //     mpu.getEvent(&a, &g, &temp);
+    //     accelBias[0] += a.acceleration.x;
+    //     accelBias[1] += a.acceleration.y;
+    //     accelBias[2] += a.acceleration.z - (float)9.81; // Subtract gravity
+    //     delay(20);
+    // }
+    accelBias[0] /= 1000;
+    accelBias[1] /= 1000;
+    accelBias[2] /= 1000;
+};
+
+String getGyroReadings(void) {
+    mpu.getEvent(&a, &g, &temp);
+
+    float gyroX_temp = g.gyro.x;
+    if (abs(gyroX_temp) > gyroXerror) {
+        gyroX += gyroX_temp / 50.00;
+    }
+
+    float gyroY_temp = g.gyro.y;
+    if (abs(gyroY_temp) > gyroYerror) {
+        gyroY += gyroY_temp / 70.00;
+    }
+
+    float gyroZ_temp = g.gyro.z;
+    if (abs(gyroZ_temp) > gyroZerror) {
+        gyroZ += gyroZ_temp / 90.00;
+    }
+
+    readings["gyroX"] = String(gyroX);
+    readings["gyroY"] = String(gyroY);
+    readings["gyroZ"] = String(gyroZ);
+
+    String jsonString = JSON.stringify(readings);
+    return jsonString;
+};
+
+String getAccReadings(void) {
+    mpu.getEvent(&a, &g, &temp);
+    accX = a.acceleration.x;
+    accY = a.acceleration.y;
+    accZ = a.acceleration.z;
+    readings["accX"] = String(accX);
+    readings["accY"] = String(accY);
+    readings["accZ"] = String(accZ);
+    String accString = JSON.stringify(readings);
+    return accString;
+};
+
+String getTemperature(void) {
+    mpu.getEvent(&a, &g, &temp);
+    temperature = temp.temperature;
+    return String(temperature);
+};
+
+void readMPUdata(void) {
+    getAccReadings();
+    getGyroReadings();
+    getTemperature();
+}; // end reading MPU data
+
+void checkMPUData(bool &dataChanged) {
+    readMPUdata(); // reads the MPU-6050 // Read gyro and accelerometer data
+    if (abs(gyroX - previousGyroX) > gyroThreshold || abs(gyroY - previousGyroY) > gyroThreshold || abs(accX - previousAccX) > accelThreshold || abs(accY - previousAccY) > accelThreshold) {
+        previousGyroX = gyroX;
+        previousGyroY = gyroY;
+        previousAccX = accX;
+        previousAccY = accY;
+        dataChanged = true;
+    }
+    else {
+        dataChanged = false;
+    }
+}; // end boolean to check if gyro or accel from mpu has changed position
+
+// void resetFlags(void) {
+//    if (!isMovingUpLeft && !isMovingDownLeft && isStopMovementLeft) {
+//         isStopMovementLeft = false;
+//    }
+//     if (!isMovingUpRight && !isMovingDownRight && isStopMovementRight) {
+//         isStopMovementRight = false;
+//     }
+//     if (isStopMovement) {
+//         isStopMovement = false;
+//     }
+//     if (isMovingUp && isMovingDown) {
+//         isMovingUpLeft = false;
+//         isMovingDownLeft = false;
+//         isMovingUpRight = false;
+//         isMovingDownRight = false;
+//     }
+// }; // resetting the flags for movement
+
+void moveActuators(bool leftUp, bool rightUp)
+{
+    if (leftUp)
+    {
+        digitalWrite(relay1_LA1LHP_Pin, LOW);
+        digitalWrite(relay2_LA1LHM_Pin, HIGH);
+    }
+    else
+    {
+        digitalWrite(relay1_LA1LHP_Pin, HIGH);
+        digitalWrite(relay2_LA1LHM_Pin, LOW);
+    }
+
+    if (rightUp)
+    {
+        digitalWrite(relay3_LA2RHP_Pin, LOW);
+        digitalWrite(relay4_LA2RHM_Pin, HIGH);
+    }
+    else
+    {
+        digitalWrite(relay3_LA2RHP_Pin, HIGH);
+        digitalWrite(relay4_LA2RHM_Pin, LOW);
+    }
+};
+
+void moveUp(void) {
+    moveActuators(true, true);
+    displayPosition();
+};
+
+void moveDown(void) {
+    moveActuators(false, false);
+    displayPosition();
+};
+
+void stopMovement(void) {
+    moveActuators(false, false);
+    displayPosition();
+};
+
+void tableLevel(void) {
+    if (isTableLevel) {
+        stopMovement();
+    }
+};
+
+void tableMovement(void) {
+    checkMPUData(dataChanged);
+    displayAllGyro2(); // Call the function to display the gyro data without fps
+
+    float speedAdjustment = map(gyroX, -90, 90, -MAX_SPEED_ADJUSTMENT, MAX_SPEED_ADJUSTMENT);
+
+    if (!isCommandBeingProcessed) {
+        int absoluteX = abs(angle_roll_output);
+        int absoluteY = abs(angle_pitch_output);
+        if (absoluteX <= threshold && absoluteY <= threshold) {
+            isTableLevel = true;
+            if (!isStopMovement) {
+                stopMovement();
+            }
+        }
+        else {
+            isTableLevel = false;
+        }
+    }
+    
+    float leftActuatorSpeed = BASE_SPEED + speedAdjustment;
+    float rightActuatorSpeed = BASE_SPEED - speedAdjustment;
+
+    // Synchronize movements of left and right actuators
+    if (rightActuatorSpeed > 0) {
+        moveDown();
+    }
+    else if (rightActuatorSpeed < 0) {
+        moveUp();
+    }
+    else {
+        stopMovement();
+    }
+
+    if (leftActuatorSpeed > 0) {
+        moveDown();
+    }
+    else if (leftActuatorSpeed < 0) {
+        moveUp();
+    }
+    else {
+        stopMovement();
+    }
+
+    angle_pitch += gyroX * 0.0000611;
+    angle_roll += gyroY * 0.0000611;
+
+    angle_pitch += angle_roll * sin(gyroZ * 0.000001066);
+    angle_roll -= angle_pitch * sin(gyroZ * 0.000001066);
+
+    acc_total_vector = sqrt((accX * accX) + (accY * accY) + (accZ * accZ));
+    angle_pitch_acc = asin((float)accY / acc_total_vector) * 57.296;
+    angle_roll_acc = asin((float)accX / acc_total_vector) * -57.296;
+
+    angle_pitch_acc -= 0.0;
+    angle_roll_acc -= 0.0;
+
+    if (set_gyro_angles) {
+        angle_pitch = angle_pitch * 0.9996 + angle_pitch_acc * 0.0004;
+        angle_roll = angle_roll * 0.9996 + angle_roll_acc * 0.0004;
+    }
+    else {
+        angle_pitch = angle_pitch_acc;
+        angle_roll = angle_roll_acc;
+        set_gyro_angles = true;
+    }
+
+    angle_pitch_output = angle_pitch_output * 0.9 + angle_pitch * 0.1;
+    angle_roll_output = angle_roll_output * 0.9 + angle_roll * 0.1;
+
+    int absoluteX = abs(angle_roll_output);
+    int absoluteY = abs(angle_pitch_output);
+
+    if (abs(angle_roll_output) > threshold || abs(angle_pitch_output) > threshold) {
+        if (angle_roll_output < 0 || angle_pitch_output < 0) {
+            newPosition--;
+        }
+        else {
+            newPosition++;
+        }
+    }
+
+    if (newPosition != currentPosition) {
+        stopMovement();
+        currentPosition = newPosition;
+        if (currentPosition > previousPosition) {
+            moveUp();
+        }
+        else if (currentPosition < previousPosition) {
+            moveDown();
+        }
+        previousPosition = currentPosition;
+    }
+}; // end table movement function
+
+void processCommand(char command) {
+    // Process the command
+    switch (command) {
+    case 'Q':
+        Serial.println(F("Quitting Program"));
+        exit(0);
+        break;
+    case 'q':
+        Serial.println(F("Quitting Program"));
+        exit(0);
+        break;
+    case 'M':
+        Serial.println(F("Constant Gyro Monitoring"));
+        while (true) {
+            readMPUdata();
+            displayAllGyro2();
+            delay(100);
+        }
+        break;
+    case 'm':
+        Serial.println(F("Constant Gyro Monitoring"));
+        while (true) {
+            readMPUdata();
+            displayAllGyro2();
+            delay(100);
+        }
+        break;
+    case 'D':
+        Serial.println(F("Moving Down"));
+        // movingDown(); // display on the OLED Screen arrow down
+        moveDown();
+        break;
+    case 'd':
+        Serial.println(F("Moving Down"));
+        // movingDown(); // display on the OLED Screen arrow down
+        moveDown();
+        break;
+    case 'U':
+        Serial.println(F("Moving Up"));
+        // movingUp(); // display on the OLED Screen arrow down
+        moveUp();
+        break;
+    case 'u':
+        Serial.println(F("Moving Up"));
+        // movingUp(); // display on the OLED Screen arrow down
+        moveUp();
+        break;
+    case 'S':
+        Serial.println(F("Stopping Movement"));
+        // heartBeat(); // display on the OLED Screen the hearbeat
+        isStopMovement = true;
+        stopMovement();
+        break;
+    case 's':
+        Serial.println(F("Stopping Movement"));
+        // heartBeat(); // display on the OLED Screen the hearbeat
+        isStopMovement = true;
+        stopMovement();
+        break;
+    default:
+        Serial.println(F("Invalid Command"));
+        break;
+    }
+}; // end process command function
+
+void tableCommands (void) {
+    static char lastCommand = 0;
+    Serial.println(F("\nSend 'U'/'u' for Up, 'D'/'d' for Down, 'S'/'s' for STOP"));
+
+    while(!Serial.available()) {
+        delay(100);
+    }
+
+    if (Serial.available()) {
+        char command = Serial.read();
+        while (Serial.available()) {
+            Serial.read();
+        }
+        Serial.print(F("Received Command: "));
+        Serial.println(command);
+
+        lastCommand = command;
+
+        processCommand(command);
+
+        tableMovement();
+    }
+    else {
+        if (lastCommand != 0) {
+            Serial.print(F("Repeating last command: "));
+            Serial.println(lastCommand);
+
+            // Process the last command
+            processCommand(lastCommand);
+        }
+        else {
+            Serial.println(F("No command received"));
+            isStopMovement = true;
+            stopMovement();
+        }
+    }
+}; // end table commands function
+
+#endif // STANDUPTABLEMOVEMENT_H
